@@ -24,12 +24,13 @@ struct MouseData
 
 struct WindowData
 {
+	static const std::uint32_t BACKGROUND_COLOR = 0x0003030F;
+
 	std::deque<MouseData> mouseData;
 	std::uint64_t highFrequencyPackets = 0;
-	BrushPtr blueBrush;
+
 	FontPtr consolasFont;
-	DeviceContextPtr backBufferContext;
-	BitmapPtr backBuffer;
+	std::unique_ptr<MemoryCanvas> backBuffer;
 
 	bool isWindowInvalidated = true;
 };
@@ -47,21 +48,25 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 	switch (message)
 	{
 	default:
-	{}	return DefWindowProcW(hwnd, message, wparam, lparam);
+	{}	break;
 
 	case WM_CREATE:
 	{
-		auto createStruct = reinterpret_cast<LPCREATESTRUCT>(lparam);
-		windowData = reinterpret_cast<WindowData*>(createStruct->lpCreateParams);
+		windowData = new WindowData;
 		SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(windowData));
-
-		windowData->blueBrush.reset(CreateSolidBrush(RGB(4, 4, 16)));
 
 		windowData->consolasFont.reset(CreateFontW(16, 0, 0, 0, FW_NORMAL, 0, 0, 0, 
 			ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_DONTCARE, L"Consolas"));
 
 		SetTimer(hwnd, 0, 100, nullptr);
-	}	break;
+	}	return 0;
+
+	case WM_CLOSE:
+	{
+		delete windowData;
+		DestroyWindow(hwnd);
+		PostQuitMessage(0);
+	}	return 0;
 
 	case WM_TIMER:
 	{
@@ -69,14 +74,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 		{
 			InvalidateRect(hwnd, nullptr, true);
 		}
-	}	break;
-
-	case WM_CLOSE:
-	{
-		delete windowData;
-		DestroyWindow(hwnd);
-		PostQuitMessage(0);
-	}	break;
+	}	return 0;
 
 	case WM_INPUT:
 	{
@@ -118,7 +116,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 		{
 			showMessageBox("Warning", "Raw input data too wide.");
 		}
-	}	break;
+	}	return 0;
 
 	case WM_PAINT:
 	{
@@ -129,26 +127,21 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 			RECT clientRect;
 			GetClientRect(hwnd, &clientRect);
 			auto clientWidth = std::uint16_t(clientRect.right - clientRect.left);
-			auto clientHeight = std::uint16_t(clientRect.top - clientRect.bottom);
+			auto clientHeight = std::uint16_t(clientRect.bottom - clientRect.top);
 
-			PaintLock paintLock(hwnd);
-
-			if (windowData->backBufferContext == nullptr)
+			if (windowData->backBuffer == nullptr)
 			{
-				windowData->backBufferContext.reset(CreateCompatibleDC(paintLock.hdc));
-				windowData->backBuffer.reset(CreateCompatibleBitmap(paintLock.hdc, clientWidth, clientHeight));
+				windowData->backBuffer = std::make_unique<MemoryCanvas>(GetDC(hwnd), clientWidth, clientHeight);
+				windowData->backBuffer->select(windowData->consolasFont.get());
 			}
 
-			SelectionLock backBufferLock(windowData->backBufferContext.get(), windowData->backBuffer.get());
+			auto backBufferContext = windowData->backBuffer->deviceContext();
 
-			auto backBufferContext = windowData->backBufferContext.get();
+			const auto nElementsToFill = std::size_t(windowData->backBuffer->width() * windowData->backBuffer->height());
+			std::fill_n(windowData->backBuffer->memoryPtr(), nElementsToFill, WindowData::BACKGROUND_COLOR); // Clear background
 
-			SetBkColor(backBufferContext, RGB(4, 4, 16));
+			SetBkColor(backBufferContext, RGB(3, 3, 15));
 			SetTextColor(backBufferContext, RGB(255, 255, 255));
-
-			FillRect(backBufferContext, &clientRect, windowData->blueBrush.get());
-
-			SelectionLock fontLock(backBufferContext, windowData->consolasFont.get());
 
 			std::string tempString;
 
@@ -163,16 +156,17 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 			tempString = "Filtered packets: " + std::to_string(windowData->highFrequencyPackets);
 			TextOutA(backBufferContext, 8, 8, tempString.c_str(), int(tempString.size()));
 
-			BitBlt(paintLock.hdc, 0, 0, clientWidth, clientHeight, backBufferContext, 0, 0, SRCCOPY);
+			PaintLock paintLock(hwnd);
+			BitBlt(paintLock.deviceContext(), 0, 0, clientWidth, clientHeight, backBufferContext, 0, 0, SRCCOPY);
 		}
-	}
+	}	return 0;
 
 	case WM_ERASEBKGND:
 	{}	return 1;
 
 	}
 
-	return 0;
+	return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
 int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int show)
@@ -187,8 +181,8 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int show)
 		windowClassEx.cbSize = sizeof windowClassEx;
 		windowClassEx.cbWndExtra = 0;
 		windowClassEx.hbrBackground = HBRUSH(GetStockObject(BLACK_BRUSH));
-		windowClassEx.hCursor = LoadCursor(nullptr, IDC_ARROW);
-		windowClassEx.hIcon = LoadIcon(nullptr, IDI_APPLICATION);;
+		windowClassEx.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+		windowClassEx.hIcon = LoadIconW(nullptr, IDI_APPLICATION);;
 		windowClassEx.hIconSm = nullptr;
 		windowClassEx.hInstance = hinstance;
 		windowClassEx.lpfnWndProc = windowProc;
@@ -198,15 +192,15 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int show)
 
 		if (!RegisterClassExW(&windowClassEx))
 		{
-			throw WindowsError("RegisterClassEx()");
+			throw WindowsError("RegisterClassEx");
 		}
 
 		auto hwnd = CreateWindowExW(0, windowClassName, windowTitle, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-			CW_USEDEFAULT, CW_USEDEFAULT, 256, 512, nullptr, nullptr, hinstance, new WindowData);
+			CW_USEDEFAULT, CW_USEDEFAULT, 240, 480, nullptr, nullptr, hinstance, nullptr);
 
 		if (hwnd == nullptr)
 		{
-			throw WindowsError("CreateWindowEx()");
+			throw WindowsError("CreateWindowEx");
 		}
 
 		RAWINPUTDEVICE devices[2] = {};
@@ -221,7 +215,7 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int show)
 
 		if (!RegisterRawInputDevices(devices, sizeof devices / sizeof *devices, sizeof *devices))
 		{
-			throw WindowsError("RegisterRawInputDevices()");
+			throw WindowsError("RegisterRawInputDevices");
 		}
 
 		ShowWindow(hwnd, show);
@@ -235,11 +229,15 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE, LPWSTR, int show)
 			DispatchMessageW(&message);
 		}
 
-		return int(message.wParam);
+		return static_cast<int>(message.wParam);
 	}
 	catch (std::exception& e)
 	{
 		showMessageBox("Fatal Error", e.what());
+	}
+	catch (...)
+	{
+		showMessageBox("Fatal Error", "Fatal Error");
 	}
 
 	return 0;

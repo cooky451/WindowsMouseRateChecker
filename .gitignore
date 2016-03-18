@@ -4,3 +4,4 @@
 *.iobj
 *.tlog
 *.idb
+/bin/
